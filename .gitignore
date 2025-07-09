@@ -1,0 +1,11 @@
+# Abaikan folder virtual environment
+venv_flask/
+
+# Abaikan file data mentah dan model
+data_nasabah.csv
+
+# Abaikan file cache Python
+__pycache__/
+
+# Abaikan file spesifik OS dan editor
+.vscode/
