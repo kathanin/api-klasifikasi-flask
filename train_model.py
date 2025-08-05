@@ -5,13 +5,15 @@ from sklearn.model_selection import train_test_split
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from scikeras.wrappers import KerasClassifier
+from sklearn.utils.class_weight import compute_class_weight
+import numpy as np
 
 # --- 1. PEMUATAN DAN PERSIAPAN DATA ---
 print("Memuat data mentah...")
 df = pd.read_csv('data_nasabah.csv')
 
-# Membuat kolom target biner (0 = Tidak Layak, 1 = Layak)
-# Asumsi: kolom target asli bernama 'hasil_klasifikasi' berisi 'Low', 'Medium', 'High'
+# Membuat kolom target biner
 target_map = {'Low': 1, 'Medium': 1, 'High': 0}
 df['target'] = df['hasil_klasifikasi'].map(target_map)
 df = df.drop(columns=['hasil_klasifikasi'])
@@ -25,11 +27,11 @@ print("Persiapan data selesai.")
 kolom_numerik = [
     'umur', 'jumlah_tanggungan', 'jumlah_penghasilan',
     'jumlah_tabungan', 'jumlah_pengajuan', 'tenor'
-    ]
+]
 kolom_kategorikal = [
     'status_pernikahan', 'pekerjaan', 
     'riwayat_kredit', 'tujuan_kredit'
-    ]
+]
 
 preprocessor = ColumnTransformer(
     transformers=[
@@ -39,23 +41,39 @@ preprocessor = ColumnTransformer(
     remainder='passthrough'
 )
 
-# --- 3. 🧠 MEMBANGUN ARSITEKTUR MODEL NEURAL NETWORK ---
-print("Membangun arsitektur model Keras...")
-model = tf.keras.Sequential([
-    # Input shape akan ditentukan secara otomatis oleh pipeline
-    tf.keras.layers.Dense(64, activation='relu'),
-    tf.keras.layers.Dropout(0.3),
-    tf.keras.layers.Dense(32, activation='relu'),
-    tf.keras.layers.Dense(1, activation='sigmoid') # Output biner
-])
-
-model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+# --- 3. 🧠 MEMBANGUN ARSITEKTUR MODEL (DI DALAM FUNGSI) ---
+# DIUBAH: Arsitektur model kini didefinisikan di dalam sebuah fungsi
+def create_model(meta):
+    # Dapatkan jumlah fitur input dari metadata scikeras
+    n_features_in_ = meta["n_features_in_"]
+    model = tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(n_features_in_,)), # Definisikan input shape dengan benar
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dropout(0.3),
+        tf.keras.layers.Dense(32, activation='relu'),
+        tf.keras.layers.Dense(1, activation='sigmoid') # Output biner dengan probabilitas
+    ])
+    return model
 
 # --- 4. 🤖 MENGGABUNGKAN PREPROCESSOR DAN MODEL ---
-# Ini adalah langkah kunci: membuat satu pipeline besar
+print("Membangun pipeline final...")
+
+# DIUBAH: Bungkus fungsi model menggunakan KerasClassifier
+# Parameter training (epochs, batch_size) didefinisikan di sini
+keras_model = KerasClassifier(
+    model=create_model,
+    optimizer="adam",
+    loss="binary_crossentropy",
+    epochs=50,
+    batch_size=32,
+    verbose=1,
+    metrics=['accuracy']
+)
+
+# Buat pipeline besar dengan model yang sudah dibungkus
 final_pipeline = Pipeline(steps=[
     ('preprocessor', preprocessor),
-    ('classifier', model)
+    ('classifier', keras_model) # Gunakan model yang sudah dibungkus
 ])
 print("Pipeline final (preprocessor + model) berhasil dibuat.")
 
@@ -64,25 +82,25 @@ print("Pipeline final (preprocessor + model) berhasil dibuat.")
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 print(f"\nMemulai training model dengan {len(X_train)} data...")
 
-# Gunakan 'classifier__' untuk memberikan parameter ke bagian model dari pipeline
-final_pipeline.fit(X_train, y_train,
-                   classifier__epochs=50,
-                   classifier__batch_size=32,
-                   classifier__verbose=1)
-print("Training selesai.")
+# Hitung bobot kelas secara otomatis berdasarkan ketidakseimbangan data training.
+# Ini akan memberikan bobot lebih tinggi pada kelas minoritas ('High').
+weights = compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
+class_weight = {0: weights[0], 1: weights[1]}
+print(f"INFO: Menggunakan Class Weights untuk menyeimbangkan data: {class_weight}")
+
+# DIUBAH: Tambahkan parameter classifier__class_weight ke dalam .fit()
+# Ini memberitahu Keras untuk lebih memperhatikan kelas 'High' (kelas 0).
+final_pipeline.fit(X_train, y_train, classifier__class_weight=class_weight)
+
+# # Cukup jalankan .fit() pada pipeline. Parameter training sudah didefinisikan di atas.
+# final_pipeline.fit(X_train, y_train)
+# print("Training selesai.")
 
 # --- 6. EVALUASI DAN SIMPAN MODEL FINAL ---
 print("\nMengevaluasi model pada data test...")
-
-# 1. Lakukan preprocessing pada data test menggunakan bagian 'preprocessor' dari pipeline
-X_test_processed = final_pipeline.named_steps['preprocessor'].transform(X_test)
-
-# 2. Gunakan metode .evaluate() dari model Keras ('classifier') pada data yang sudah diproses
-loss, accuracy = final_pipeline.named_steps['classifier'].evaluate(X_test_processed, y_test, verbose=0)
-
+accuracy = final_pipeline.score(X_test, y_test)
 print(f"Akurasi model pada data test: {accuracy * 100:.2f}%")
-print(f"Loss model pada data test: {loss:.4f}")
 
-# Simpan keseluruhan pipeline (preprocessor + model) ke satu file
+# Simpan keseluruhan pipeline ke satu file
 joblib.dump(final_pipeline, 'model_kredit_final.joblib')
 print("\n✅ Model final berhasil disimpan sebagai 'model_kredit_final.joblib'")
